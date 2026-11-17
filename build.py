@@ -5,8 +5,20 @@ from collections import defaultdict
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SEED = os.environ.get("SEED_CSV") or os.path.join(HERE, "data", "fl-dentists-seed.csv")
+REMOVED = os.path.join(HERE, "data", "removed.txt")
+STATIC = os.path.join(HERE, "static")
 DIST = os.path.join(HERE, "dist")
 BASE = "https://dentistryusa.com"
+SUPPORT = "support@dentistryusa.com"
+PER_PAGE = 25
+# The database (Supabase). This key is meant for browsers: row level security
+# in supabase/migrations decides what it can read and write.
+SUPABASE_URL = "https://dayctjcljbklonolzpyt.supabase.co"
+SUPABASE_KEY = "sb_publishable_nlgVrnlD4fCKfEKtiB88Fg_9WsqplXQ"
+# Search engines may index the site only when Netlify builds it for the real
+# domain (Netlify sets URL to the site's primary address). The netlify.app
+# preview and local builds are noindex.
+INDEXABLE = (os.environ.get("URL") or "").rstrip("/") == BASE
 FOOT = "Listings come from the public NPI registry. Dentists can claim and update their listing."
 SPONSORED = ('Sponsored placement, when offered, is labeled "Sponsored" and is paid advertising, '
              "not a rating or recommendation.")
@@ -25,8 +37,9 @@ FAVICON = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
 # Search box in the header of every page except the home page (which has the big one).
 HSEARCH = ('<form class="hsearch" action="/" method="get" role="search">'
            '<label class="sr" for="hq">Search dentists</label>'
-           '<input id="hq" name="q" type="search" placeholder="Name, city or specialty">'
+           '<input id="hq" name="q" type="search" placeholder="Name, city, ZIP or specialty">'
            '<button type="submit">Search</button></form>\n')
+SUPPORT_LINK = f'<a href="mailto:{SUPPORT}">{SUPPORT}</a>'
 esc = html.escape
 
 def slug(s):
@@ -42,6 +55,13 @@ def is_po(a):
 
 def listings(n):
     return f"{n:,} listing" + ("" if n == 1 else "s")
+
+def removed_npis():
+    """NPIs listed in data/removed.txt (one per line, # starts a note)."""
+    if not os.path.exists(REMOVED):
+        return set()
+    with open(REMOVED, encoding="utf-8") as f:
+        return {line.split("#")[0].strip() for line in f if line.split("#")[0].strip()}
 
 def write(path, text):
     p = os.path.join(DIST, path)
@@ -59,7 +79,7 @@ def page(path, title, desc, body, extra_head="", noindex=False, hero="", wide=Fa
 <title>{esc(title)}</title>
 <meta name="description" content="{esc(desc)}">
 <link rel="canonical" href="{url}">
-{'<meta name="robots" content="noindex">' if noindex else ''}
+{'<meta name="robots" content="noindex">' if noindex or not INDEXABLE else ''}
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 {FONTS}
 <link rel="stylesheet" href="/style.css">{extra_head}
@@ -71,8 +91,8 @@ def page(path, title, desc, body, extra_head="", noindex=False, hero="", wide=Fa
 {hero}{inner}
 </main>
 <footer class="site"><div class="wrap"><div><p class="logo"><span>Dentistry<b>USA</b></span></p><p>{FOOT}</p>
-<p>{SPONSORED}</p></div>
-<nav aria-label="Footer"><a href="/fl/">Florida dentists by city</a><a href="/pricing/">Pricing</a><a href="/claim/">Claim a listing</a></nav></div></footer>
+<p>{SPONSORED}</p><p>Questions? Email {SUPPORT_LINK}.</p></div>
+<nav aria-label="Footer"><a href="/fl/">Florida dentists by city</a><a href="/pricing/">Pricing</a><a href="/claim/">Claim a listing</a><a href="/remove/">Remove a listing</a></nav></div></footer>
 </body></html>""")
     return url
 
@@ -85,16 +105,41 @@ def band(crumb_html, h1, lead=""):
     return ('<div class="band"><div class="wrap">' + crumb_html + f"<h1>{h1}</h1>"
             + (f"<p>{lead}</p>" if lead else "") + "</div></div>\n")
 
+def chunks(lst):
+    return [lst[i:i + PER_PAGE] for i in range(0, len(lst), PER_PAGE)] or [[]]
+
+def page_path(base, n):
+    """base is a folder such as fl/miami/; page 1 is the folder itself."""
+    return base if n == 1 else f"{base}page/{n}/"
+
+def pager(base, n, total):
+    """Previous / numbers / Next for page n of total. base is the first page's path, e.g. fl/miami/."""
+    if total <= 1:
+        return ""
+    href = lambda k: "/" + page_path(base, k)
+    nums = sorted({1, 2, total - 1, total, n - 1, n, n + 1} & set(range(1, total + 1)))
+    parts = [f'<a class="step" href="{href(n - 1)}" rel="prev">Previous</a>' if n > 1
+             else '<span class="step off">Previous</span>']
+    last = 0
+    for k in nums:
+        if k - last > 1:
+            parts.append('<span class="gap" aria-hidden="true">&hellip;</span>')
+        parts.append(f'<a href="{href(k)}" aria-current="page">{k}</a>' if k == n else f'<a href="{href(k)}">{k}</a>')
+        last = k
+    parts.append(f'<a class="step" href="{href(n + 1)}" rel="next">Next</a>' if n < total
+                 else '<span class="step off">Next</span>')
+    return f'<nav class="pager" aria-label="Pages, {n} of {total}">' + "".join(parts) + "</nav>"
+
 def load():
-    rows, seen_npi = [], set()
+    rows, seen_npi, skip = [], set(), removed_npis()
     with open(SEED, newline="", encoding="utf-8") as f:
         for r in csv.DictReader(f):
             city = tcase(r["city"])
-            if not city or r["npi"] in seen_npi:
+            if not city or r["npi"] in seen_npi or r["npi"] in skip:
                 continue
             seen_npi.add(r["npi"])
             nm = " ".join(x for x in (r["first_name"], r["last_name"]) if x)
-            r.update(city=city, cslug=slug(city), name="Dr. " + nm,
+            r.update(city=city, cslug=slug(city), name="Dr. " + nm, nm=nm,
                      spec=r["specialty"] or "Dentist", sslug=slug(r["specialty"] or "Dentist"),
                      nslug=slug(nm), addr1=tcase(r["address1"]), addr2=tcase(r["address2"]))
             r["url"] = f"/dentist/{r['npi']}-{r['nslug']}/"
@@ -115,7 +160,7 @@ def doc_li(r, spec=True, addr=True):
         bits.append('<span class="nb">' + esc(r["phone"]) + "</span>")
     if bits:
         lines.append('<p class="muted">' + " &middot; ".join(bits) + "</p>")
-    return (f'<li class="doc"><span class="av" aria-hidden="true">{r["ini"]}</span><div>'
+    return (f'<li class="doc" data-npi="{r["npi"]}"><span class="av" aria-hidden="true">{r["ini"]}</span><div>'
             f'<a href="{r["url"]}">{esc(r["name"])}{esc(r["credtxt"])}</a>' + "".join(lines) + "</div></li>")
 
 def chips(c, specs, by_cs, sname, total, current=None):
@@ -127,12 +172,29 @@ def chips(c, specs, by_cs, sname, total, current=None):
         items.append(f'<li><a href="/fl/{c}/{s}/"{cur}>{esc(sname[s])} <small>{len(by_cs[(c, s)]):,}</small></a></li>')
     return '<nav aria-label="Specialties in this city"><ul class="chips">' + "".join(items) + "</ul></nav>"
 
+def paged_list(base, lst, title, desc, crumb_items, h1, chip_html, show_spec):
+    """Writes a list of dentists 25 per page: base/, base/page/2/, ... Returns the URLs."""
+    parts, urls = chunks(lst), []
+    total = len(parts)
+    for n, part in enumerate(parts, 1):
+        suffix = f" (page {n} of {total})" if total > 1 else ""
+        lead = listings(len(lst)) + "." + (f" Page {n} of {total}." if total > 1 else "")
+        urls.append(page(page_path(base, n) + "index.html", title.replace(" | ", suffix + " | ", 1),
+            desc + (f" Page {n} of {total}." if total > 1 else ""),
+            '<h2 class="sr">By specialty</h2>' + chip_html +
+            '<h2 class="sr">Dentists</h2><ul class="docs">' + "".join(doc_li(r, spec=show_spec) for r in part) + "</ul>" +
+            pager(base, n, total),
+            hero=band(crumbs(*crumb_items), h1, lead)))
+    return urls
+
 def build():
     if os.path.exists(DIST):
         shutil.rmtree(DIST)
     os.makedirs(DIST)
     shutil.copy(os.path.join(HERE, "style.css"), DIST)
+    shutil.copytree(STATIC, DIST, dirs_exist_ok=True)
     write("favicon.svg", FAVICON)
+    write("config.js", "window.DUSA=" + json.dumps({"url": SUPABASE_URL, "key": SUPABASE_KEY}) + ";\n")
     rows = load()
     rows.sort(key=lambda r: (r["last_name"].lower(), r["first_name"].lower()))
     by_city, by_cs, by_practice, by_spec = defaultdict(list), defaultdict(list), defaultdict(list), defaultdict(list)
@@ -142,6 +204,7 @@ def build():
         by_practice[r["pkey"]].append(r); by_spec[r["sslug"]].append(r); cname[r["cslug"]] = r["city"]
     sname = {r["sslug"]: r["spec"] for r in rows}
     assert "specialty" not in by_city, "a city slug collides with /fl/specialty/"
+    assert "page" not in sname, "a specialty slug collides with /page/"
     specs_by_size = sorted(by_spec, key=lambda s: (-len(by_spec[s]), sname[s]))
     urls = []
 
@@ -155,10 +218,10 @@ def build():
     more = f'<p class="muted more">More specialties: {more}</p>' if more else ""
     home_hero = f"""<section class="hero"><div class="deco" aria-hidden="true"></div><div class="wrap">
 <h1>Find a dentist in Florida</h1>
-<p class="sub">Search {len(rows):,} Florida dentists by name, city or specialty.</p>
+<p class="sub">Search {len(rows):,} Florida dentists by name, city, ZIP code or specialty.</p>
 <form id="search" class="searchbar" role="search" action="/" method="get">
-<label class="sr" for="q">Dentist name, city or specialty</label>
-<input id="q" name="q" type="search" autocomplete="off" placeholder="e.g. Miami, orthodontist, Smith">
+<label class="sr" for="q">Dentist name, city, ZIP code or specialty</label>
+<input id="q" name="q" type="search" autocomplete="off" placeholder="e.g. Miami orthodontist, 33145, Smith">
 <button class="go" type="submit">Search</button>
 <ul id="results" class="results" aria-live="polite" hidden></ul></form>
 <p class="note">Florida only for now. Other states are coming soon.</p>
@@ -169,7 +232,7 @@ def build():
 {more}</div></section>
 <section class="sec soft"><div class="wrap"><h2>How DentistryUSA works</h2>
 <ol class="steps">
-<li><span class="n" aria-hidden="true">1</span><h3>Search your way</h3><p>Look up a dentist by name, city or specialty.</p></li>
+<li><span class="n" aria-hidden="true">1</span><h3>Search your way</h3><p>Look up a dentist by name, city, ZIP code or specialty.</p></li>
 <li><span class="n" aria-hidden="true">2</span><h3>See the details</h3><p>Profiles show practice details from the public NPI registry, such as the address and phone.</p></li>
 <li><span class="n" aria-hidden="true">3</span><h3>Free to use</h3><p>No account needed to search. Dentists can claim their own listing for free.</p></li>
 </ol></div></section>
@@ -202,27 +265,22 @@ def build():
             hero=band(crumbs(("Home", "/"), ("Florida", "/fl/"), (sname[s], None)), f"{esc(sname[s])} in Florida",
                       f"{listings(len(by_spec[s]))} in {where}. Pick a city.")))
 
-    # city + city/specialty
+    # city + city/specialty, 25 dentists per page
     for c, lst in by_city.items():
         city = cname[c]
         specs = sorted({r["sslug"] for r in lst}, key=lambda s: sname[s])
-        urls.append(page(f"fl/{c}/index.html", f"Dentists in {city}, FL | DentistryUSA",
+        urls += paged_list(f"fl/{c}/", lst, f"Dentists in {city}, FL | DentistryUSA",
             f"{len(lst):,} dentists in {city}, Florida, listed from the public NPI registry.",
-            '<h2 class="sr">By specialty</h2>' + chips(c, specs, by_cs, sname, len(lst)) +
-            '<h2 class="sr">All dentists</h2><ul class="docs">' + "".join(doc_li(r) for r in lst) + "</ul>",
-            hero=band(crumbs(("Home", "/"), ("Florida", "/fl/"), (city, None)),
-                      f"Dentists in {esc(city)}, FL", listings(len(lst)) + ".")))
+            [("Home", "/"), ("Florida", "/fl/"), (city, None)], f"Dentists in {esc(city)}, FL",
+            chips(c, specs, by_cs, sname, len(lst)), True)
         for s in specs:
             sl_ = by_cs[(c, s)]
-            urls.append(page(f"fl/{c}/{s}/index.html", f"{sname[s]} in {city}, FL | DentistryUSA",
+            urls += paged_list(f"fl/{c}/{s}/", sl_, f"{sname[s]} in {city}, FL | DentistryUSA",
                 f"{len(sl_):,} {sname[s].lower()} listings in {city}, Florida from the public NPI registry.",
-                '<h2 class="sr">By specialty</h2>' + chips(c, specs, by_cs, sname, len(lst), s) +
-                '<h2 class="sr">Dentists</h2><ul class="docs">' + "".join(doc_li(r, spec=False) for r in sl_) + "</ul>",
-                hero=band(crumbs(("Home", "/"), ("Florida", "/fl/"), (city, f"/fl/{c}/"), (sname[s], None)),
-                          f"{esc(sname[s])} in {esc(city)}, FL", listings(len(sl_)) + ".")))
+                [("Home", "/"), ("Florida", "/fl/"), (city, f"/fl/{c}/"), (sname[s], None)],
+                f"{esc(sname[s])} in {esc(city)}, FL", chips(c, specs, by_cs, sname, len(lst), s), False)
 
     # profiles
-    search = []
     for r in rows:
         po = r["po"]
         place = f"{r['city']}, FL {r['zip5']}"
@@ -249,12 +307,20 @@ def build():
 <p class="lead">{esc(r['spec'])} in <a href="/fl/{r['cslug']}/">{esc(r['city'])}, FL</a></p></div></div>
 <div class="card"><dl class="facts"><dt>Practice address</dt><dd>{esc(addr)}</dd>{phone}<dt>NPI</dt><dd>{r['npi']}</dd></dl>{call}</div>
 {mates_html}
-<p class="muted">This information comes from the public NPI registry and may be out of date.</p>
+<p class="muted">This information comes from the public NPI registry and may be out of date. Is something wrong, or should this listing come down? <a href="/remove/?npi={r['npi']}">Ask us to remove it</a>.</p>
 </div>
 <aside class="claim"><p><strong>Is this you?</strong> Claim your free listing to fix details and add your own.</p>
 <a class="btn" href="/claim/?npi={r['npi']}">Claim your free listing</a></aside></div>""",
             '<script type="application/ld+json">' + json.dumps(ld).replace("</", "<\\/") + '</script>'))
-        search.append({"npi": r["npi"], "name": r["name"] + cred, "city": r["city"], "specialty": r["spec"], "url": r["url"]})
+
+    # search index: shared city and specialty names, one short row per dentist
+    cities = sorted(set(cname.values()))
+    specs = sorted(set(sname.values()))
+    ci, si = {c: i for i, c in enumerate(cities)}, {s: i for i, s in enumerate(specs)}
+    write("search.json", json.dumps({"cities": cities, "specs": specs,
+        # cname: one spelling per city page (the data has variants such as "St Johns" / "St. Johns")
+        "rows": [[r["npi"], r["nm"], r["credential"], ci[cname[r["cslug"]]], si[r["spec"]], r["zip5"]] for r in rows]},
+        separators=(",", ":"), ensure_ascii=False))
 
     # pricing
     def tier(name, price, items):
@@ -275,54 +341,66 @@ def build():
                   "Every dentist in Florida has a free DentistryUSA profile. Renew your listing to add your photos, "
                   "hours and booking link, and to show up first in your city.")))
 
-    # claim
-    urls.append(page("claim/index.html", "Claim Your Free Listing | DentistryUSA",
-        "Claim and update your free DentistryUSA dentist listing.",
-        """<!-- TODO(Jelo): this form posts nowhere. Build the backend (spec section 4): POST to your endpoint,
-     email a magic link to the address, create the claim row, then let them edit. Until then JS shows a notice. -->
-<form id="claim" class="card formcard" method="post" action="#" novalidate>
-<p><label for="npi">NPI number</label><input id="npi" name="npi" inputmode="numeric" pattern="[0-9]{10}" required></p>
-<p><label for="name">Your name</label><input id="name" name="name" required></p>
-<p><label for="email">Work email</label><input id="email" name="email" type="email" required></p>
-<p><label for="role">Your role</label><select id="role" name="role"><option>Dentist</option><option>Office manager</option><option>Other</option></select></p>
-<button class="btn" type="submit">Submit claim</button>
-<p id="note" role="status" class="muted"></p></form>
-<script>
-var n=new URLSearchParams(location.search).get("npi");if(n&&/^\\d{10}$/.test(n))document.getElementById("npi").value=n;
-document.getElementById("claim").addEventListener("submit",function(e){e.preventDefault();
-document.getElementById("note").textContent="Claims are not open yet. Please check back soon.";});
-</script>""", noindex=True,
-        hero=band("", "Claim your free listing", "Tell us who you are and we will follow up. Claiming is free.")))
-    urls.pop()  # claim page is noindex; keep it out of the sitemap
+    form_js = '<script src="/config.js" defer></script><script src="/forms.js" defer></script>'
 
-    write("search.json", json.dumps(search, separators=(",", ":")))
-    write("search.js", SEARCH_JS)
-    write("robots.txt", f"User-agent: *\nAllow: /\nDisallow: /preview/\nDisallow: /account/\nDisallow: /admin/\nDisallow: /claim/\n\nSitemap: {BASE}/sitemap.xml\n")
+    # claim (anyone can send one; it waits in the admin inbox)
+    page("claim/index.html", "Claim Your Free Listing | DentistryUSA",
+        "Claim and update your free DentistryUSA dentist listing.",
+        f"""<form id="claim" class="card formcard" novalidate>
+<p><label for="npi">NPI number</label><input id="npi" name="npi" inputmode="numeric" autocomplete="off" maxlength="10" required aria-describedby="npiHelp npiInfo">
+<span id="npiHelp" class="hint">10 digits. You can find it on your DentistryUSA profile.</span><span id="npiInfo" class="hint" aria-live="polite"></span></p>
+<p><label for="name">Your name</label><input id="name" name="name" autocomplete="name" required></p>
+<p><label for="email">Work email</label><input id="email" name="email" type="email" autocomplete="email" required></p>
+<p><label for="phone">Phone <span class="opt-label">(optional)</span></label><input id="phone" name="phone" type="tel" autocomplete="tel"></p>
+<p><label for="role">Your role</label><select id="role" name="role"><option>Dentist</option><option>Office manager</option><option>Other</option></select></p>
+<p class="err" role="alert" tabindex="-1" hidden></p>
+<button class="btn" type="submit">Submit claim</button>
+<noscript><p class="err">This form needs JavaScript. You can also email {SUPPORT_LINK}.</p></noscript>
+</form>
+<div id="claimDone" class="card formcard done" tabindex="-1" hidden></div>""", form_js, noindex=True,
+        hero=band("", "Claim your free listing",
+                  "Tell us who you are. We will check that you work at this practice and get back to you. Claiming is free."))
+
+    # remove (linked from our emails and from every profile)
+    page("remove/index.html", "Remove a Listing or Stop Emails | DentistryUSA",
+        "Ask DentistryUSA to remove a dentist listing or to stop sending emails.",
+        f"""<form id="remove" class="card formcard" novalidate>
+<fieldset><legend>What would you like us to do?</legend>
+<label class="opt"><input type="radio" name="request" value="remove_listing" checked> Remove my listing from DentistryUSA</label>
+<label class="opt"><input type="radio" name="request" value="stop_emails"> Stop sending me emails</label></fieldset>
+<p><label for="npi">NPI number <span id="npiOpt" class="opt-label" hidden>(optional)</span></label><input id="npi" name="npi" inputmode="numeric" autocomplete="off" maxlength="10" aria-describedby="npiInfo">
+<span id="npiInfo" class="hint" aria-live="polite"></span></p>
+<p><label for="name">Your name</label><input id="name" name="name" autocomplete="name" required></p>
+<p><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="email" required></p>
+<p><label for="note">Anything else we should know? <span class="opt-label">(optional)</span></label><textarea id="note" name="note" rows="3" maxlength="500"></textarea></p>
+<p class="err" role="alert" tabindex="-1" hidden></p>
+<button class="btn" type="submit">Send request</button>
+<noscript><p class="err">This form needs JavaScript. You can also email {SUPPORT_LINK}.</p></noscript>
+</form>
+<div id="removeDone" class="card formcard done" tabindex="-1" hidden></div>
+<p class="muted">You can also email {SUPPORT_LINK}.</p>""", form_js, noindex=True,
+        hero=band("", "Remove a listing or stop emails",
+                  "Listings come from the public NPI registry. If you are the dentist, or you work at the practice, "
+                  "we will remove the listing or stop emailing you."))
+
+    # admin inbox (sign-in required; the database decides who is an admin)
+    page("admin/index.html", "Admin | DentistryUSA", "DentistryUSA admin inbox.",
+        '<div id="admin" class="admin"><p class="muted">Loading&hellip;</p></div>'
+        '<noscript><p class="err">The admin page needs JavaScript.</p></noscript>',
+        '<script src="/vendor/supabase-js-2.119.0.js" defer></script><script src="/config.js" defer></script>'
+        '<script src="/admin.js" defer></script>', noindex=True,
+        hero=band("", "Admin inbox", "Claims and removal requests."))
+
+    if INDEXABLE:
+        write("robots.txt", f"User-agent: *\nAllow: /\nDisallow: /preview/\nDisallow: /account/\nDisallow: /admin/\n"
+              f"Disallow: /claim/\nDisallow: /remove/\n\nSitemap: {BASE}/sitemap.xml\n")
+    else:
+        write("robots.txt", "# Preview build: not for search engines.\nUser-agent: *\nDisallow: /\n")
     # sitemap limit is 50k URLs per file; this site is well under
     write("sitemap.xml", '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
           "".join(f"<url><loc>{u}</loc></url>\n" for u in urls) + "</urlset>\n")
     return len(rows), len(by_city), len(by_cs), len(by_spec), len(urls)
 
-# The home page search. It also runs a search passed in as /?q=..., which is how
-# the small search box in the header of the other pages gets here.
-SEARCH_JS = r"""(function(){
-var form=document.getElementById("search"),q=document.getElementById("q"),out=document.getElementById("results"),data=null,loading=false;
-function esc(s){return s.replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]})}
-function show(h){out.innerHTML=h;out.hidden=!h}
-function run(){var t=q.value.trim().toLowerCase();if(t.length<2){show("");return}
-var w=t.split(/\s+/),hits=[];for(var i=0;i<data.length&&hits.length<20;i++){var d=data[i],h=(d.name+" "+d.city+" "+d.specialty).toLowerCase();
-if(w.every(function(x){return h.indexOf(x)>-1}))hits.push(d)}
-show(hits.length?hits.map(function(d){return '<li><a href="'+d.url+'"><strong>'+esc(d.name)+'</strong><span>'+esc(d.specialty)+' · '+esc(d.city)+', FL</span></a></li>'}).join(""):'<li class="none">No matches.</li>')}
-function go(){if(data)return run();if(loading)return;loading=true;
-fetch("/search.json").then(function(r){return r.json()}).then(function(j){data=j;run()}).catch(function(){loading=false;show('<li class="none">Search is unavailable right now.</li>')})}
-q.addEventListener("input",go);
-q.addEventListener("focus",function(){if(out.innerHTML)out.hidden=false});
-form.addEventListener("submit",function(e){e.preventDefault();go()});
-document.addEventListener("click",function(e){if(!form.contains(e.target))out.hidden=true});
-document.addEventListener("keydown",function(e){if(e.key==="Escape")out.hidden=true});
-var p=new URLSearchParams(location.search).get("q");if(p){q.value=p;go()}
-})();"""
-
 if __name__ == "__main__":
     n, c, cs, sp, u = build()
-    print(f"dentists={n} cities={c} city+specialty={cs} specialties={sp} sitemap_urls={u}")
+    print(f"dentists={n} cities={c} city+specialty={cs} specialties={sp} sitemap_urls={u} indexable={INDEXABLE}")

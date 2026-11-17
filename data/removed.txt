@@ -1,0 +1,2 @@
+# NPI numbers to leave off the site, one per line (for example after a /remove request).
+# Anything after # is a note. Rebuild and push after changing this file.
