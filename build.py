@@ -167,7 +167,7 @@ def build():
 <a class="btn" href="/claim/?npi={r['npi']}">Claim your free listing</a></div>
 {mates_html}
 <p class="muted">This information comes from the public NPI registry and may be out of date.</p>""",
-            f'<script type="application/ld+json">{json.dumps(ld).replace("</", "<\\/")}</script>'))
+            '<script type="application/ld+json">' + json.dumps(ld).replace("</", "<\\/") + '</script>'))
         search.append({"npi": r["npi"], "name": r["name"] + cred, "city": r["city"], "specialty": r["spec"], "url": r["url"]})
 
     # pricing
