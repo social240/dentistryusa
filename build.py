@@ -92,7 +92,7 @@ def page(path, title, desc, body, extra_head="", noindex=False, hero="", wide=Fa
 </main>
 <footer class="site"><div class="wrap"><div><p class="logo"><span>Dentistry<b>USA</b></span></p><p>{FOOT}</p>
 <p>{SPONSORED}</p><p>Questions? Email {SUPPORT_LINK}.</p></div>
-<nav aria-label="Footer"><a href="/fl/">Florida dentists by city</a><a href="/pricing/">Pricing</a><a href="/claim/">Claim a listing</a><a href="/remove/">Remove a listing</a></nav></div></footer>
+<nav aria-label="Footer"><a href="/fl/">Florida dentists by city</a><a href="/pricing/">Pricing</a><a href="/claim/">Claim a listing</a><a href="/account/">Dentist sign-in</a><a href="/remove/">Remove a listing</a></nav></div></footer>
 </body></html>""")
     return url
 
@@ -172,6 +172,13 @@ def chips(c, specs, by_cs, sname, total, current=None):
         items.append(f'<li><a href="/fl/{c}/{s}/"{cur}>{esc(sname[s])} <small>{len(by_cs[(c, s)]):,}</small></a></li>')
     return '<nav aria-label="Specialties in this city"><ul class="chips">' + "".join(items) + "</ul></nav>"
 
+# Browser scripts: the database address and key, the Supabase client (sign-in pages),
+# "Book online" marks on lists, and the booking box (profiles and /appointment/).
+CONFIG_JS = '<script src="/config.js" defer></script>'
+SUPABASE_JS = '<script src="/vendor/supabase-js-2.119.0.js" defer></script>' + CONFIG_JS
+ONLINE_JS = CONFIG_JS + '<script src="/online.js" defer></script>'
+BOOKING_JS = CONFIG_JS + '<script src="/booking.js" defer></script>'
+
 def paged_list(base, lst, title, desc, crumb_items, h1, chip_html, show_spec):
     """Writes a list of dentists 25 per page: base/, base/page/2/, ... Returns the URLs."""
     parts, urls = chunks(lst), []
@@ -183,7 +190,7 @@ def paged_list(base, lst, title, desc, crumb_items, h1, chip_html, show_spec):
             desc + (f" Page {n} of {total}." if total > 1 else ""),
             '<h2 class="sr">By specialty</h2>' + chip_html +
             '<h2 class="sr">Dentists</h2><ul class="docs">' + "".join(doc_li(r, spec=show_spec) for r in part) + "</ul>" +
-            pager(base, n, total),
+            pager(base, n, total), ONLINE_JS,
             hero=band(crumbs(*crumb_items), h1, lead)))
     return urls
 
@@ -299,19 +306,24 @@ def build():
         tel = re.sub(r"\D", "", r["phone"])
         phone = f'<dt>Phone</dt><dd><a href="tel:+1{tel}">{esc(r["phone"])}</a></dd>' if r["phone"] else ""
         call = f'<p class="actions"><a class="btn ghost" href="tel:+1{tel}">Call {esc(r["phone"])}</a></p>' if r["phone"] else ""
+        # Filled in by booking.js when the practice takes online bookings; hidden otherwise.
+        book = (f'<section id="book" class="card book" aria-labelledby="bookH" data-npi="{r["npi"]}" '
+                f'data-dentist="{esc(r["name"] + cred)}" data-address="{esc("" if po else addr)}" '
+                f'data-phone="{esc(r["phone"])}" hidden></section>')
         urls.append(page(f"dentist/{r['npi']}-{r['nslug']}/index.html", title,
             f"{r['name']}{cred}, {r['spec'].lower()} in {r['city']}, FL. Practice address, phone and NPI from the public NPI registry.",
             crumbs(("Home", "/"), ("Florida", "/fl/"), (r["city"], f"/fl/{r['cslug']}/"), (r["name"], None)) +
             f"""<div class="profile"><div>
 <div class="phead"><span class="av xl" aria-hidden="true">{r['ini']}</span><div><h1>{esc(r['name'])}{esc(cred)}</h1>
 <p class="lead">{esc(r['spec'])} in <a href="/fl/{r['cslug']}/">{esc(r['city'])}, FL</a></p></div></div>
+{book}
 <div class="card"><dl class="facts"><dt>Practice address</dt><dd>{esc(addr)}</dd>{phone}<dt>NPI</dt><dd>{r['npi']}</dd></dl>{call}</div>
 {mates_html}
 <p class="muted">This information comes from the public NPI registry and may be out of date. Is something wrong, or should this listing come down? <a href="/remove/?npi={r['npi']}">Ask us to remove it</a>.</p>
 </div>
-<aside class="claim"><p><strong>Is this you?</strong> Claim your free listing to fix details and add your own.</p>
+<aside class="claim" id="claimBox"><p><strong>Is this you?</strong> Claim your free listing to fix details and add your own.</p>
 <a class="btn" href="/claim/?npi={r['npi']}">Claim your free listing</a></aside></div>""",
-            '<script type="application/ld+json">' + json.dumps(ld).replace("</", "<\\/") + '</script>'))
+            BOOKING_JS + '<script type="application/ld+json">' + json.dumps(ld).replace("</", "<\\/") + '</script>'))
 
     # search index: shared city and specialty names, one short row per dentist
     cities = sorted(set(cname.values()))
@@ -357,7 +369,8 @@ def build():
 <button class="btn" type="submit">Submit claim</button>
 <noscript><p class="err">This form needs JavaScript. You can also email {SUPPORT_LINK}.</p></noscript>
 </form>
-<div id="claimDone" class="card formcard done" tabindex="-1" hidden></div>""", form_js, noindex=True,
+<div id="claimDone" class="card formcard done" tabindex="-1" hidden></div>
+<p class="muted">Already approved? <a href="/account/">Sign in</a> to turn on online booking and set your hours.</p>""", form_js, noindex=True,
         hero=band("", "Claim your free listing",
                   "Tell us who you are. We will check that you work at this practice and get back to you. Claiming is free."))
 
@@ -387,13 +400,28 @@ def build():
     page("admin/index.html", "Admin | DentistryUSA", "DentistryUSA admin inbox.",
         '<div id="admin" class="admin"><p class="muted">Loading&hellip;</p></div>'
         '<noscript><p class="err">The admin page needs JavaScript.</p></noscript>',
-        '<script src="/vendor/supabase-js-2.119.0.js" defer></script><script src="/config.js" defer></script>'
-        '<script src="/admin.js" defer></script>', noindex=True,
+        SUPABASE_JS + '<script src="/admin.js" defer></script>', noindex=True,
         hero=band("", "Admin inbox", "Claims and removal requests."))
+
+    # the dentist's own account (sign-in required; the database decides what they own)
+    page("account/index.html", "Dentist Sign-in | DentistryUSA",
+        "Sign in to manage your DentistryUSA listing and online booking.",
+        '<div id="account" class="account"><p class="muted">Loading&hellip;</p></div>'
+        '<noscript><p class="err">This page needs JavaScript.</p></noscript>',
+        SUPABASE_JS + '<script src="/account.js" defer></script>', noindex=True,
+        hero=band("", "Your DentistryUSA listing", "Turn on online booking, set your hours and see your appointments."))
+
+    # a patient's appointment, opened from the private link they get when booking (/appointment/#token)
+    page("appointment/index.html", "Your Appointment | DentistryUSA",
+        "View, change or cancel your dentist appointment.",
+        '<div id="appt" class="appt"><p class="muted">Loading&hellip;</p></div>'
+        '<noscript><p class="err">This page needs JavaScript. To change your appointment, call the dental office.</p></noscript>',
+        BOOKING_JS, noindex=True,
+        hero=band("", "Your appointment", "View, change or cancel it."))
 
     if INDEXABLE:
         write("robots.txt", f"User-agent: *\nAllow: /\nDisallow: /preview/\nDisallow: /account/\nDisallow: /admin/\n"
-              f"Disallow: /claim/\nDisallow: /remove/\n\nSitemap: {BASE}/sitemap.xml\n")
+              f"Disallow: /appointment/\nDisallow: /claim/\nDisallow: /remove/\n\nSitemap: {BASE}/sitemap.xml\n")
     else:
         write("robots.txt", "# Preview build: not for search engines.\nUser-agent: *\nDisallow: /\n")
     # sitemap limit is 50k URLs per file; this site is well under

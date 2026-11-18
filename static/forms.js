@@ -104,8 +104,14 @@
           var next = text('p', 'We will review it and contact you at ');
           next.appendChild(text('strong', f.email));
           next.appendChild(document.createTextNode('. Claiming is free.'));
+          var after = text('p', 'Once it is approved, ');
+          var signin = document.createElement('a');
+          signin.href = '/account/';
+          signin.textContent = 'sign in with this email';
+          after.appendChild(signin);
+          after.appendChild(document.createTextNode(' to turn on online booking and set your hours.'));
           done(claim, 'claimDone', 'Thanks, we got your claim.', [text('p', 'Listing: ' + who + ' (NPI ' + f.npi + ').'), next,
-            supportLine('Questions? Email')]);
+            after, supportLine('Questions? Email')]);
         })
         .catch(function (err) { busy(claim, false); setErr(claim, err.message); });
     });

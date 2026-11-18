@@ -89,11 +89,17 @@
       items.length ? h('ul', {class: 'inbox-list'}, items.map(make)) : h('p', {class: 'muted', text: empty})]);
   }
 
+  // A sign-in event while a load is running, or for the user already on screen,
+  // must not redraw the inbox (it would swallow a click).
+  var shownFor = null, loading = false;
   function load() {
+    loading = true;
     sb.auth.getSession().then(function (s) {
       var session = s.data.session;
-      if (!session) return signIn();
+      if (!session) { loading = false; return signIn(); }
       sb.rpc('is_admin').then(function (a) {
+        loading = false;
+        shownFor = session.user.id;
         if (a.error || !a.data) {
           return set([bar(session), fail('This account is not an admin. Ask to be added, then reload this page.')]);
         }
@@ -104,7 +110,7 @@
           var openRemovals = removals.filter(function (x) { return x.status === 'new'; }).length;
           set([bar(session),
             section('Claims (' + openClaims + ' waiting)', claims, 'No claims yet.', claimCard,
-              'Approving a claim makes that email the owner of the listing.'),
+              'Approving a claim makes that email the owner of the listing. They sign in at /account/ to set their hours and take online bookings.'),
             section('Removal requests (' + openRemovals + ' new)', removals, 'No removal requests yet.', removalCard,
               'To take a listing off the site, add its NPI to data/removed.txt in the repo and push. Then mark the request done.')]);
         });
@@ -112,6 +118,10 @@
     });
   }
 
-  sb.auth.onAuthStateChange(function (ev) { if (ev === 'SIGNED_IN') load(); });
+  // setTimeout: supabase-js asks not to call the client from inside this callback.
+  sb.auth.onAuthStateChange(function (ev, session) {
+    if (ev === 'SIGNED_IN' && session && session.user.id !== shownFor && !loading) setTimeout(load, 0);
+    if (ev === 'SIGNED_OUT') shownFor = null;
+  });
   load();
 })();
